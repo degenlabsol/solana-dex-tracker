@@ -1,108 +1,87 @@
-# 📈 Solana DEX Tracker Bot
+# Solana DEX Tracker Bot v2 (Pipeline & Image Edition)
 
-![Node.js](https://img.shields.io/badge/Node.js-18.x-green)
-![Telegram API](https://img.shields.io/badge/Telegram-Bot%20API-blue)
-![Solana](https://img.shields.io/badge/Solana-Web3-purple)
-![License](https://img.shields.io/badge/License-MIT-brightgreen)
+A high-performance Telegram bot that discovers new Solana tokens on DexScreener and posts detailed reports including token images, real-time stats, and quick-trade links.
 
-An automated Telegram bot that continuously monitors [DexScreener](https://dexscreener.com/) for new Solana token profiles and boosted pairs. It filters out the noise based on your custom criteria (liquidity, market cap, holders) and delivers highly detailed, real-time token alerts directly to your Telegram channel.
+**Pipeline Update:** This version is optimized to act as a "Scout" for the **Solana Rug Analyzer**. The tracker bypasses heavy filtering to provide a high-frequency data feed. While the Tracker provides the visual "Newsfeed," the Rug Analyzer works in the background to perform deep security audits (Honeypot checks, Holder analysis) and posts the "Elite Calls" every 10 minutes.
 
 ## ✨ Features
-* **Automated Polling:** Continuously scans DexScreener's `latest profiles`, `latest boosts`, and `top boosts` endpoints.
-* **Smart Filtering:** Only forwards tokens that meet your strict criteria (e.g., Minimum Liquidity > $3000, Max Market Cap < $500k).
-* **Multi-API Enrichment:** Automatically fetches additional context from:
-  * [GeckoTerminal](https://www.geckoterminal.com/) (Social links, holder counts, GT Security Score)
-  * [Birdeye](https://birdeye.so/) & Solana Vibe Station (Optional fallback pricing)
-* **Anti-Spam System:** Built-in `seen` cache and cooldown timers ensure your channel isn't flooded with duplicate or rapid-fire alerts.
-* **Rich Media:** Automatically attaches the token's logo/header image to the alert if available.
+
+- **Image Support:** Automatically fetches token icons or headers and posts them directly with the message.
+- **Beautiful Layout:** Clean, professional design using un-destructible HTML formatting.
+- **Pipeline Optimized:** No hard filters in the tracker to ensure a full data stream for the Rug Analyzer.
+- **Spam Protection:** Integrated 3-second queue to prevent Telegram rate-limiting or bans.
+- **Clean Links:** No hidden Markdown links (prevents Telegram preview clutter), only raw clickable links at the bottom.
+- **Full Stats:** Market Cap, Price, Liquidity, Volume (1h/24h), Price Change (5m/1h/6h/24h), and Trade counts.
 
 ---
 
-## 📊 Example Output
-When a token passes your filters, the bot sends a comprehensive alert to your channel:
+## What the Bot Posts (Example)
 
-> 🚀 **DegenToken** ($DEGEN) 🟣💊
-> 🌱 Age: 12m   👀 Boosts: 5
-> 
-> 📊 **Token Stats**
-> ➰ MC:   $45.50K
-> ➰ USD:  $0.0000455 (+12.4% 5m)
-> ➰ LIQ:  $15.20K
-> ➰ VOL:  $85.10K (24h) | $30.50K (1h)
-> 
-> 📈 **Price Change**
-> ➰ 5M:  +12.4% | 1H: +45.2% | 24H: +45.2%
-> 
-> 📉 **Trades**
-> ➰ 1H:  B 450 / S 120
-> ➰ 24H: B 450 / S 120
-> 
-> 👥 **Holders**
-> ➰ HLD: 154 | Top 10: 18.50%
-> 
-> 📍 **Addresses**
-> ➰ Token: `DeGenXyz123456789abcdefghijklmnopqrstuv`
-> 
-> 🔗 **Socials**
-> [TG](https://t.me/...) • [𝕏](https://x.com/...) • [Web](https://...)
-> 
-> ⚠️ **Audit** 🟩🟩🟩
-> ✅ DEX [PAID]
-> ✅ Liquidity OK
-> ✅ GT Score 85
-> 
-> 📊 **Charts**
-> [DEX] • [BIRD]
-> 
-> 🤖 **Trade**
-> [Photon] • [BullX]
-> 
-> 📝 _The ultimate community driven token on Solana..._
+🚀 **Token Name** ($SYMBOL) 🟣💊
+🌱 Age: 12m   👀 Boosts: 5
+
+📊 **Token Stats**
+➰ MC:   $45.50K
+➰ USD:  $0.0000455 (+12.5% 5m)
+➰ LIQ:  $18.20K
+➰ VOL:  $150K (24h) | $45K (1h)
+
+📈 **Price Change**
+➰ 5M:  +12.50%
+➰ 1H:  +45.00%
+➰ 6H:  +120.00%
+➰ 24H: +120.00%
+
+📍 **Addresses**
+➰ Token: BkjP1Um3ZZZTyGVxd7vrRaqGiaZC2K2Xk2VjKexzpump
+➰ Pool:  B7dv...czEL
+
+🔗 **Socials**
+TG • 𝕏 • Web
+
+... (and more)
+
+BkjP1Um3ZZZTyGVxd7vrRaqGiaZC2K2Xk2VjKexzpump
+https://dexscreener.com/solana/BkjP1Um3ZZZTyGVxd7vrRaqGiaZC2K2Xk2VjKexzpump
 
 ---
 
-## 🚀 Installation & Setup
+## Setup (Windows / Server / Termux)
 
-### 1. Prerequisites
-* **Node.js** (v18 or higher)
-* **Telegram Bot Token:** Create a new bot via [@BotFather](https://t.me/botfather) on Telegram and get your token.
+> Requires Node.js 18+ and Git.
 
-### 2. Clone and Install
-Open your terminal (CMD/PowerShell) and run:
+### 1. Installation
 ```bash
-git clone [https://github.com/degenlabsol/solana-dex-tracker.git](https://github.com/degenlabsol/solana-dex-tracker.git)
-cd solana-dex-tracker
+git clone <your-repo-link>
+cd Solana-dex-tracker
 npm install
+```
 
-### 3. Configuration (.env)
-Create a .env file in the root directory. You can use the provided .env.example as a template:
+### 2. Configuration (.env)
+Create a `.env` file in the root directory:
+```env
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=@yourchannel
+```
 
-# Telegram Setup
-TELEGRAM_BOT_TOKEN=123456789:ABCDefghIJKLmnopQRSTuvwxYZ
-TELEGRAM_CHAT_ID=-1001234567890
+### 3. Start (with PM2)
+```bash
+pm2 start index.js --name DexTracker
+```
 
-# Timing (in milliseconds)
-SCAN_INTERVAL_MS=15000
-POST_COOLDOWN_MS=8000
+---
 
-# Filters
-MIN_LIQUIDITY=3000
-MAX_MARKETCAP=500000
-MIN_HOLDERS=0
+## Architecture & Filtering (IMPORTANT)
 
-# Optional API Keys (Leave blank if you don't have them)
-SVS_API_KEY=
-BIRDEYE_API_KEY=
+In this Pipeline Edition, strict filters (like `MIN_LIQUIDITY` or `MAX_MARKETCAP`) have been intentionally removed from the Tracker.
 
-Note: Make sure your bot is added as an Administrator to the target channel/group so it has permission to send messages.
+**Why?** The DexTracker acts as a "Dumb Scout." Its job is to find everything. The "Smart Analysis" (Holder counts, Mint/Freeze checks, strict MC limits) is handled by the **Solana Rug Analyzer**, which monitors this channel and picks the "Winner" every 10 minutes.
 
-### 4. Run the Bot
-To start the tracker manually:
+---
 
-npm start
+## Security
+- `.env` is included in `.gitignore` – your tokens will never be pushed to GitHub.
+- The bot only makes outgoing HTTPS calls to DexScreener & Telegram.
 
-For 24/7 deployment on a server (like a Raspberry Pi or VPS), it is recommended to use a process manager like PM2.
-
-⚠️ Disclaimer
-This software is for educational and informational purposes only. Do not use this as financial advice. Trading Solana meme coins is highly risky. Always DYOR (Do Your Own Research).
-
+## Troubleshooting
+**SyntaxError: Unexpected end of input** -> This usually happens when copying code manually into Termux/Nano and the last bracket is missing. Delete index.js and paste the code again carefully.
