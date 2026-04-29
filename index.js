@@ -12,7 +12,6 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: false });
 const seen = new Set();
 const postQueue = [];
 
-// --- Hilfsfunktionen ---
 const fmtNum = (n) => {
     if (!n || isNaN(n)) return '0.00';
     if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
@@ -33,7 +32,6 @@ function getAgeString(createdAt) {
     return `${diffMins}m`;
 }
 
-// --- Haupt-Scan-Logik ---
 async function scan() {
     try {
         const res = await fetch('https://api.dexscreener.com/token-profiles/latest/v1');
@@ -49,87 +47,84 @@ async function scan() {
             const pair = pairData.pairs?.find(p => p.chainId === 'solana');
             
             if (!pair) continue;
+            // KEIN LIQUIDITÄTS-FILTER MEHR! Der Tracker ist dumm und sammelt nur!
 
-            const mc = pair.fdv || pair.marketCap || 0;
-            const liq = pair.liquidity?.usd || 0;
-            const vol24 = pair.volume?.h24 || 0;
-
-            if (liq < 2000) continue; // Leichter Filter gegen den extremen Müll
-
-            postQueue.push({ item, pair, mc, liq, vol24 });
+            postQueue.push({ item, pair });
         }
-    } catch (e) { 
-        console.error("Scan Error:", e.message); 
-    }
+    } catch (e) { console.error("Scan Error:", e.message); }
 }
 
-// --- Warteschlange abarbeiten ---
 setInterval(async () => {
     if (postQueue.length === 0) return;
-    const { item, pair, mc, liq, vol24 } = postQueue.shift();
+    const { item, pair } = postQueue.shift();
 
+    const mc = pair.fdv || pair.marketCap || 0;
+    const liq = pair.liquidity?.usd || 0;
+    const vol24 = pair.volume?.h24 || 0;
     const ageStr = getAgeString(pair.pairCreatedAt);
     const boosts = item.boosts || 0;
     
     const soc = item.links || [];
-    const tg = soc.find(s => s.type === 'telegram') ? `[TG](${soc.find(s => s.type === 'telegram').url})` : '';
-    const x = soc.find(s => s.type === 'twitter') ? `[𝕏](${soc.find(s => s.type === 'twitter').url})` : '';
-    const web = soc.find(s => s.type === 'website') ? `[Web](${soc.find(s => s.type === 'website').url})` : '';
-    const socialsStr = [tg, x, web].filter(Boolean).join(' • ') || 'N/A';
+    const tg = soc.find(s => s.type === 'telegram') ? 'TG' : '~TG~';
+    const x = soc.find(s => s.type === 'twitter') ? '𝕏' : '~𝕏~';
+    const web = soc.find(s => s.type === 'website') ? 'Web' : '~Web~';
+    const socialsStr = [tg, x, web].join(' • ');
 
-    const description = item.description ? `\n📝 ${item.description.slice(0, 100)}${item.description.length > 100 ? '...' : ''}` : '';
+    const description = item.description ? `\n📝 ${item.description.slice(0, 100)}${item.description.length > 100 ? '...' : ''}\n` : '';
 
     let auditLines = '';
     if (boosts > 0) auditLines += `✅ DEX PAID\n`;
     if (liq > 15000) auditLines += `✅ Liquidity OK ($${fmtNum(liq)})\n`;
     else auditLines += `⚠️ Low Liquidity ($${fmtNum(liq)})\n`;
 
-    let msg = `🚀 *${pair.baseToken.name}* ($${pair.baseToken.symbol}) 🟣💊\n`;
+    let msg = `🚀 ${pair.baseToken.name} ($${pair.baseToken.symbol}) 🟣💊\n`;
     msg += `🌱 Age: ${ageStr}   👀 Boosts: ${boosts}\n\n`;
 
-    msg += `📊 *Token Stats*\n`;
+    msg += `📊 Token Stats\n`;
     msg += `➰ MC:   $${fmtNum(mc)}\n`;
     msg += `➰ USD:  $${pair.priceUsd} (${fmtPct(pair.priceChange?.m5)} 5m)\n`;
     msg += `➰ LIQ:  $${fmtNum(liq)}\n`;
     msg += `➰ VOL:  $${fmtNum(vol24)} (24h) | $${fmtNum(pair.volume?.h1)} (1h)\n\n`;
 
-    msg += `📈 *Price Change*\n`;
+    msg += `📈 Price Change\n`;
     msg += `➰ 5M:  ${fmtPct(pair.priceChange?.m5)}\n`;
     msg += `➰ 1H:  ${fmtPct(pair.priceChange?.h1)}\n`;
     msg += `➰ 6H:  ${fmtPct(pair.priceChange?.h6)}\n`;
     msg += `➰ 24H: ${fmtPct(pair.priceChange?.h24)}\n\n`;
 
-    msg += `📉 *Trades*\n`;
+    msg += `📉 Trades\n`;
     msg += `➰ 1H:  B ${pair.txns?.h1?.buys || 0} / S ${pair.txns?.h1?.sells || 0}\n`;
     msg += `➰ 24H: B ${pair.txns?.h24?.buys || 0} / S ${pair.txns?.h24?.sells || 0}\n\n`;
 
-    msg += `👥 *Holders*\n`;
+    msg += `👥 Holders\n`;
     msg += `➰ HLD: N/A (Fast scan)\n`;
     msg += `➰ Top 10: N/A\n\n`;
 
-    msg += `📍 *Addresses*\n`;
-    msg += `➰ Token: \`${item.tokenAddress}\`\n`;
+    msg += `📍 Addresses\n`;
+    msg += `➰ Token: ${item.tokenAddress}\n`;
     msg += `➰ Pool:  ${shortAddr(pair.pairAddress)}\n\n`;
 
-    msg += `🔗 *Socials*\n${socialsStr}\n\n`;
+    msg += `🔗 Socials\n${socialsStr}\n\n`;
 
-    msg += `⚠️ *Audit* 🟧🟥\n${auditLines}\n`;
+    msg += `⚠️ Audit 🟧🟥\n${auditLines}\n`;
 
-    msg += `📊 *Charts*\n`;
-    msg += `[DEX](https://dexscreener.com/solana/${item.tokenAddress}) • GT • BIRD • SCAN • DEF\n\n`;
+    msg += `📊 Charts\n`;
+    msg += `DEX • GT • BIRD • SCAN • DEF\n\n`;
 
-    msg += `🤖 *Trading*\n`;
-    msg += `[Photon](https://photon-sol.tinyastro.io/en/r/@/${item.tokenAddress}) • [BullX](https://bullx.io/terminal?chainId=1399811149&address=${item.tokenAddress}) • Trojan • Maestro\n`;
-    msg += `${description}`;
+    msg += `🤖 Trading\n`;
+    msg += `Photon • Axiom • BullX • GMGN • Trojan • Maestro • Banana\n`;
+    msg += `${description}\n`;
+    
+    // NUR NOCH REINE LINKS AM ENDE
+    msg += `${item.tokenAddress}\n`;
+    msg += `https://dexscreener.com/solana/${item.tokenAddress}`;
 
     try {
-        await bot.sendMessage(CHAT_ID, msg, { parse_mode: 'Markdown', disable_web_page_preview: true });
+        await bot.sendMessage(CHAT_ID, msg, { disable_web_page_preview: true });
         console.log(`✅ Posted Detail-View: ${pair.baseToken.symbol}`);
-    } catch (e) {
-        console.error("Post Error:", e.message);
-    }
+    } catch (e) { console.error("Post Error:", e.message); }
 }, 3000); 
 
 setInterval(scan, SCAN_INTERVAL);
 scan();
-console.log("🚀 DexTracker (Beautiful Format Mode) aktiv!");
+console.log("🚀 DexTracker (DUMB & CLEAN Mode) aktiv!");
