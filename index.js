@@ -9,14 +9,15 @@ const TelegramBot = require('node-telegram-bot-api');
 // =====================================================
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const SCAN_INTERVAL = parseInt(process.env.SCAN_INTERVAL_MS) || 15000;
-const POST_COOLDOWN = parseInt(process.env.POST_COOLDOWN_MS) || 8000;
+const SCAN_INTERVAL  = parseInt(process.env.SCAN_INTERVAL_MS)  || 12000;  // scan every 12s
+const POST_COOLDOWN  = parseInt(process.env.POST_COOLDOWN_MS)  || 5000;   // 5s between posts
+const SEEN_TTL_MS    = 25 * 60 * 1000;                                    // 25min: then postable again
 
-const MIN_LIQUIDITY = parseInt(process.env.MIN_LIQUIDITY) || 0;
-const MAX_MARKETCAP = parseInt(process.env.MAX_MARKETCAP) || 0;
-const MIN_HOLDERS = parseInt(process.env.MIN_HOLDERS) || 0;
+const MIN_LIQUIDITY  = parseInt(process.env.MIN_LIQUIDITY)  || 0;
+const MAX_MARKETCAP  = parseInt(process.env.MAX_MARKETCAP)  || 0;
+const MIN_HOLDERS    = parseInt(process.env.MIN_HOLDERS)    || 0;
 
-const SVS_API_KEY = process.env.SVS_API_KEY || '';
+const SVS_API_KEY    = process.env.SVS_API_KEY    || '';
 const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY || '';
 
 if (!BOT_TOKEN || !CHAT_ID) {
@@ -25,17 +26,38 @@ if (!BOT_TOKEN || !CHAT_ID) {
 }
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
-const seen = new Set();
-let lastPostTime = 0;
 
-process.on('uncaughtException', (e) => console.error('Uncaught:', e.message));
-process.on('unhandledRejection', (e) => console.error('Unhandled:', e?.message || e));
+// seen: addr → timestamp (when last posted)
+// After SEEN_TTL_MS the token is released again
+const seen = new Map();
+let lastPostTime = 0;
+let isPosting = false;
+
+// Post Queue: Tokens to be posted
+const postQueue = [];
+
+process.on('uncaughtException',   (e) => console.error('Uncaught:', e.message));
+process.on('unhandledRejection',  (e) => console.error('Unhandled:', e?.message || e));
 process.on('SIGINT', () => { console.log('\n👋 Bot is shutting down...'); process.exit(0); });
 
-function rememberSeen(addr) {
-    seen.add(addr);
-    if (seen.size > 5000) {
-        const first = seen.values().next().value;
+// =====================================================
+// Seen Management with TTL
+// =====================================================
+function isSeen(addr) {
+    if (!seen.has(addr)) return false;
+    const ts = seen.get(addr);
+    if (Date.now() - ts > SEEN_TTL_MS) {
+        seen.delete(addr);   // TTL expired → release again
+        return false;
+    }
+    return true;
+}
+
+function markSeen(addr) {
+    seen.set(addr, Date.now());
+    // Memory limit: max 2000 entries
+    if (seen.size > 2000) {
+        const first = seen.keys().next().value;
         seen.delete(first);
     }
 }
@@ -49,16 +71,15 @@ function fmt(num) {
     if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
     if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
     if (n >= 1e3) return (n / 1e3).toFixed(2) + 'K';
-    if (n >= 1) return n.toFixed(2);
-    if (n > 0) return n.toPrecision(4);
+    if (n >= 1)   return n.toFixed(2);
+    if (n > 0)    return n.toPrecision(4);
     return '0';
 }
 
 function pct(num) {
     if (num === null || num === undefined || isNaN(Number(num))) return 'N/A';
     const n = Number(num);
-    const sign = n > 0 ? '+' : '';
-    return `${sign}${n.toFixed(2)}%`;
+    return `${n > 0 ? '+' : ''}${n.toFixed(2)}%`;
 }
 
 function shortAddr(a) {
@@ -73,27 +94,16 @@ function ageFromMs(ms) {
     if (m < 60) return `${m}m`;
     const h = Math.floor(m / 60);
     if (h < 24) return `${h}h`;
-    const d = Math.floor(h / 24);
-    return `${d}d`;
+    return `${Math.floor(h / 24)}d`;
 }
 
-// Markdown V1: escape only _ * ` [ - but ALL occurrences
 function escapeMd(text) {
     if (text === null || text === undefined) return '';
     return String(text).replace(/([_*`\[\]])/g, '\\$1');
 }
 
-// For plain-text fields that land in a Markdown context (e.g. in code-spans or links)
-function safeText(text) {
-    if (text === null || text === undefined) return '';
-    // Remove or replace characters that confuse Telegram Markdown
-    return String(text)
-        .replace(/\\/g, '')
-        .replace(/([_*`\[\]])/g, '\\$1');
-}
-
 // =====================================================
-// API Calls with Timeout & Retry
+// API Calls
 // =====================================================
 async function safeFetch(url, opts = {}, timeoutMs = 10000) {
     const ctrl = new AbortController();
@@ -126,9 +136,9 @@ async function dsTopBoosts() {
 
 async function dsTokenPairs(tokenAddress) {
     const json = await safeFetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`);
-    if (!json || !json.pairs || json.pairs.length === 0) return null;
+    if (!json?.pairs?.length) return null;
     const sol = json.pairs.filter(p => p.chainId === 'solana');
-    if (sol.length === 0) return null;
+    if (!sol.length) return null;
     sol.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
     return sol[0];
 }
@@ -149,17 +159,6 @@ async function gtTokenInfo(tokenAddress) {
     return json?.data?.attributes || null;
 }
 
-async function gtTopPool(tokenAddress) {
-    const json = await safeFetch(
-        `https://api.geckoterminal.com/api/v2/networks/solana/tokens/${tokenAddress}/pools`,
-        { headers: { 'accept': 'application/json' } }
-    );
-    if (!json?.data || json.data.length === 0) return null;
-    const pools = json.data.map(p => p.attributes);
-    pools.sort((a, b) => (parseFloat(b.reserve_in_usd) || 0) - (parseFloat(a.reserve_in_usd) || 0));
-    return pools[0];
-}
-
 async function svsPrice(tokenAddress) {
     if (!SVS_API_KEY) return null;
     const json = await safeFetch(
@@ -169,112 +168,87 @@ async function svsPrice(tokenAddress) {
     return json?.data || json || null;
 }
 
-async function birdeye(tokenAddress) {
-    if (!BIRDEYE_API_KEY) return null;
-    const json = await safeFetch(
-        `https://public-api.birdeye.so/defi/price?address=${tokenAddress}`,
-        { headers: { 'accept': 'application/json', 'x-chain': 'solana', 'X-API-KEY': BIRDEYE_API_KEY } }
-    );
-    return json?.success ? json.data : null;
-}
-
 // =====================================================
-// Audit Logic
+// Audit
 // =====================================================
 function buildAudit(pair, gtInfo) {
     const flags = [];
-    let score = 0;
-    let max = 0;
+    let score = 0, max = 0;
 
     max++;
     if (pair?.boosts?.active > 0 || pair?.labels?.includes('dex-paid')) {
-        flags.push('✅ DEX [PAID]');
-        score++;
+        flags.push('✅ DEX [PAID]'); score++;
     }
 
     max++;
     const liq = pair?.liquidity?.usd || 0;
     if (liq >= 10000) { flags.push('✅ Liquidity OK'); score++; }
-    else if (liq > 0) flags.push(`⚠️ Low Liquidity ($${fmt(liq)})`);
+    else if (liq > 0)   flags.push(`⚠️ Low Liquidity ($${fmt(liq)})`);
 
-    if (gtInfo) {
-        if (gtInfo.gt_score !== undefined) {
-            max++;
-            if (gtInfo.gt_score >= 50) { flags.push(`✅ GT Score ${Math.round(gtInfo.gt_score)}`); score++; }
-            else flags.push(`⚠️ GT Score ${Math.round(gtInfo.gt_score)}`);
-        }
+    if (gtInfo?.gt_score !== undefined) {
+        max++;
+        if (gtInfo.gt_score >= 50) { flags.push(`✅ GT Score ${Math.round(gtInfo.gt_score)}`); score++; }
+        else                          flags.push(`⚠️ GT Score ${Math.round(gtInfo.gt_score)}`);
     }
 
-    let emoji = '🟧🟧';
-    if (max > 0) {
-        const ratio = score / max;
-        if (ratio >= 0.8) emoji = '🟩🟩🟩';
-        else if (ratio >= 0.5) emoji = '🟨🟨';
-        else emoji = '🟧🟥';
-    }
+    const ratio = max > 0 ? score / max : 0;
+    const emoji = ratio >= 0.8 ? '🟩🟩🟩' : ratio >= 0.5 ? '🟨🟨' : '🟧🟥';
     return { flags, emoji };
 }
 
 // =====================================================
-// Build message – NO output change, just escaping fix
+// Build Message
 // =====================================================
 function buildMessage({ profile, pair, gt, gtInfo, svs }) {
     const tokenAddress = profile.tokenAddress;
-    const base = pair?.baseToken || {};
+    const base   = pair?.baseToken || {};
+    const name   = escapeMd(base.name   || gt?.name   || profile.name   || 'Unknown');
+    const symbol = escapeMd(base.symbol || gt?.symbol || 'N/A');
 
-    // Raw data (unescaped) for calculations
-    const rawName = base.name || gt?.name || profile.name || 'Unknown';
-    const rawSymbol = base.symbol || gt?.symbol || 'N/A';
+    const price  = pair?.priceUsd || gt?.price_usd || svs?.price || 0;
+    const mc     = pair?.marketCap || pair?.fdv || gt?.fdv_usd || gt?.market_cap_usd || 0;
+    const ath    = gt?.ath_price_usd
+        ? Number(gt.ath_price_usd) * (Number(pair?.fdv || 0) / Number(price || 1))
+        : null;
+    const liq    = pair?.liquidity?.usd || gt?.total_reserve_in_usd || 0;
+    const vol24  = pair?.volume?.h24    || gt?.volume_usd?.h24 || 0;
+    const vol1h  = pair?.volume?.h1     || 0;
 
-    // Escaped for Markdown
-    const name = escapeMd(rawName);
-    const symbol = escapeMd(rawSymbol);
-
-    const price = pair?.priceUsd || gt?.price_usd || svs?.price || 0;
-    const mc = pair?.marketCap || pair?.fdv || gt?.fdv_usd || gt?.market_cap_usd || 0;
-    const ath = gt?.ath_price_usd ? Number(gt.ath_price_usd) * (Number(pair?.fdv || 0) / Number(price || 1)) : null;
-    const liq = pair?.liquidity?.usd || (gt && gt.total_reserve_in_usd) || 0;
-    const vol24 = pair?.volume?.h24 || gt?.volume_usd?.h24 || 0;
-    const vol1h = pair?.volume?.h1 || 0;
-
-    const ch5m = pair?.priceChange?.m5;
-    const ch1h = pair?.priceChange?.h1;
-    const ch6h = pair?.priceChange?.h6;
+    const ch5m  = pair?.priceChange?.m5;
+    const ch1h  = pair?.priceChange?.h1;
+    const ch6h  = pair?.priceChange?.h6;
     const ch24h = pair?.priceChange?.h24;
 
-    const buys1h = pair?.txns?.h1?.buys ?? 0;
-    const sells1h = pair?.txns?.h1?.sells ?? 0;
-    const buys24h = pair?.txns?.h24?.buys ?? 0;
-    const sells24h = pair?.txns?.h24?.sells ?? 0;
+    const buys1h  = pair?.txns?.h1?.buys   ?? 0;
+    const sells1h = pair?.txns?.h1?.sells  ?? 0;
+    const buys24h = pair?.txns?.h24?.buys  ?? 0;
+    const sells24h= pair?.txns?.h24?.sells ?? 0;
 
     const holders = gt?.holders?.count || gtInfo?.holders?.count || 'N/A';
-    const top10 = gtInfo?.holders?.distribution_percentage?.top_10
-        || gt?.holders?.distribution_percentage?.top_10
-        || null;
+    const top10   = gtInfo?.holders?.distribution_percentage?.top_10
+                 || gt?.holders?.distribution_percentage?.top_10
+                 || null;
 
-    const created = pair?.pairCreatedAt;
-    const age = created ? ageFromMs(created) : 'N/A';
-
-    const poolAddr = pair?.pairAddress || gt?.address || '';
-    const dexUrl = pair?.url || `https://dexscreener.com/solana/${tokenAddress}`;
+    const age     = pair?.pairCreatedAt ? ageFromMs(pair.pairCreatedAt) : 'N/A';
+    const poolAddr= pair?.pairAddress || gt?.address || '';
+    const dexUrl  = pair?.url || `https://dexscreener.com/solana/${tokenAddress}`;
 
     // Socials
     const socials = {};
     if (pair?.info?.socials) {
         for (const s of pair.info.socials) {
-            if (s.type === 'twitter' || s.url?.includes('x.com') || s.url?.includes('twitter.com')) socials.x = s.url;
-            else if (s.type === 'telegram' || s.url?.includes('t.me')) socials.tg = s.url;
-            else if (s.type === 'discord') socials.dc = s.url;
+            if (s.type === 'twitter' || s.url?.includes('x.com') || s.url?.includes('twitter.com')) socials.x  = s.url;
+            else if (s.type === 'telegram' || s.url?.includes('t.me'))                               socials.tg = s.url;
+            else if (s.type === 'discord')                                                            socials.dc = s.url;
         }
     }
-    if (pair?.info?.websites && pair.info.websites.length > 0) socials.web = pair.info.websites[0].url;
-    if (gtInfo?.websites && gtInfo.websites.length > 0 && !socials.web) socials.web = gtInfo.websites[0];
-    if (gtInfo?.twitter_handle && !socials.x) socials.x = `https://x.com/${gtInfo.twitter_handle}`;
-    if (gtInfo?.telegram_handle && !socials.tg) socials.tg = `https://t.me/${gtInfo.telegram_handle}`;
+    if (pair?.info?.websites?.[0]?.url && !socials.web)    socials.web = pair.info.websites[0].url;
+    if (gtInfo?.websites?.[0] && !socials.web)              socials.web = gtInfo.websites[0];
+    if (gtInfo?.twitter_handle && !socials.x)               socials.x   = `https://x.com/${gtInfo.twitter_handle}`;
+    if (gtInfo?.telegram_handle && !socials.tg)             socials.tg  = `https://t.me/${gtInfo.telegram_handle}`;
 
     const audit = buildAudit(pair, gtInfo);
 
-    // ===== Message =====
     let m = '';
     m += `🚀 *${name}* ($${symbol})${profile.totalAmount ? ' 🟣💊' : ''}\n`;
     m += `🌱 Age: ${age}   👀 Boosts: ${profile.totalAmount || profile.amount || 0}\n\n`;
@@ -307,33 +281,27 @@ function buildMessage({ profile, pair, gt, gtInfo, svs }) {
     if (poolAddr) m += `➰ Pool:  [${shortAddr(poolAddr)}](https://solscan.io/account/${poolAddr})\n`;
 
     const socialLinks = [];
-    if (socials.tg) socialLinks.push(`[TG](${socials.tg})`);
-    if (socials.x) socialLinks.push(`[𝕏](${socials.x})`);
+    if (socials.tg)  socialLinks.push(`[TG](${socials.tg})`);
+    if (socials.x)   socialLinks.push(`[𝕏](${socials.x})`);
     if (socials.web) socialLinks.push(`[Web](${socials.web})`);
-    if (socials.dc) socialLinks.push(`[DC](${socials.dc})`);
-    if (socialLinks.length > 0) {
-        m += `\n🔗 *Socials*\n${socialLinks.join(' • ')}\n`;
-    }
+    if (socials.dc)  socialLinks.push(`[DC](${socials.dc})`);
+    if (socialLinks.length > 0) m += `\n🔗 *Socials*\n${socialLinks.join(' • ')}\n`;
 
     m += `\n⚠️ *Audit* ${audit.emoji}\n`;
-    if (audit.flags.length > 0) {
-        m += audit.flags.join('\n') + '\n';
-    } else {
-        m += `No audit data available\n`;
-    }
+    if (audit.flags.length > 0) m += audit.flags.join('\n') + '\n';
+    else m += `No audit data available\n`;
 
     m += `\n📊 *Charts*\n`;
-    const chartLinks = [
+    m += [
         `[DEX](${dexUrl})`,
         `[GT](https://www.geckoterminal.com/solana/pools/${poolAddr || tokenAddress})`,
         `[BIRD](https://birdeye.so/token/${tokenAddress}?chain=solana)`,
         `[SCAN](https://solscan.io/token/${tokenAddress})`,
         `[DEF](https://www.defined.fi/sol/${tokenAddress})`,
-    ];
-    m += chartLinks.join(' • ') + '\n';
+    ].join(' • ') + '\n';
 
     m += `\n🤖 *Trading*\n`;
-    const tradeLinks = [
+    m += [
         `[Photon](https://photon-sol.tinyastro.io/en/r/@/${tokenAddress})`,
         `[Axiom](https://axiom.trade/t/${tokenAddress})`,
         `[BullX](https://bullx.io/terminal?chainId=1399811149&address=${tokenAddress})`,
@@ -341,8 +309,7 @@ function buildMessage({ profile, pair, gt, gtInfo, svs }) {
         `[Trojan](https://t.me/achilles_trojanbot?start=r-${tokenAddress})`,
         `[Maestro](https://t.me/MaestroSniperBot?start=${tokenAddress})`,
         `[Banana](https://t.me/BananaGun_bot?start=snp_${tokenAddress})`,
-    ];
-    m += tradeLinks.join(' • ') + '\n';
+    ].join(' • ') + '\n';
 
     const desc = profile.description || gtInfo?.description;
     if (desc && desc.length > 0) {
@@ -354,14 +321,11 @@ function buildMessage({ profile, pair, gt, gtInfo, svs }) {
 }
 
 // =====================================================
-// Send with robust fallback
+// Sending
 // =====================================================
 async function sendPost(profile, pair, gt, gtInfo, svs) {
     const now = Date.now();
-    if (now - lastPostTime < POST_COOLDOWN) {
-        console.log(`⏳ Cooldown ${Math.round((POST_COOLDOWN - (now - lastPostTime)) / 1000)}s`);
-        return false;
-    }
+    if (now - lastPostTime < POST_COOLDOWN) return false;
 
     let message;
     try {
@@ -381,7 +345,7 @@ async function sendPost(profile, pair, gt, gtInfo, svs) {
             lastPostTime = Date.now();
             return true;
         } catch (e) {
-            console.log(`⚠️ Photo Error (${e.message}), trying without image...`);
+            console.log(`⚠️ Photo error, trying without image...`);
         }
     }
 
@@ -391,8 +355,7 @@ async function sendPost(profile, pair, gt, gtInfo, svs) {
         lastPostTime = Date.now();
         return true;
     } catch (e) {
-        // Attempt 3: Without Markdown (Plain-Text Fallback)
-        console.log(`⚠️ Markdown Error (${e.message}), sending as plain text...`);
+        // Attempt 3: Plain-Text Fallback
         try {
             const plainMsg = message.replace(/[*_`\[\]]/g, '').replace(/\\/g, '');
             await bot.sendMessage(CHAT_ID, plainMsg, { disable_web_page_preview: true });
@@ -406,11 +369,46 @@ async function sendPost(profile, pair, gt, gtInfo, svs) {
 }
 
 // =====================================================
-// Scan – no filter, post all Solana Boost tokens
+// Queue Worker: runs independently of scan interval
+// Posts as soon as something is in the queue and cooldown ok
+// =====================================================
+async function processQueue() {
+    if (isPosting || postQueue.length === 0) return;
+
+    const now = Date.now();
+    if (now - lastPostTime < POST_COOLDOWN) return;
+
+    isPosting = true;
+    const job = postQueue.shift();
+
+    try {
+        const ok = await sendPost(job.profile, job.pair, job.gt, job.gtInfo, job.svs);
+        if (ok) {
+            const sym = job.pair?.baseToken?.symbol || job.profile.tokenAddress;
+            const hasBild = !!(job.profile.header || job.profile.icon || job.pair?.info?.imageUrl || job.gtInfo?.image_url);
+            console.log(`✅ Posted Detail-View (Image: ${hasBild}): ${sym}`);
+        } else {
+            // On error: Put token back at the front of the queue (max 1 retry)
+            if (!job.retried) {
+                job.retried = true;
+                postQueue.unshift(job);
+            }
+        }
+    } catch (e) {
+        console.error('Queue Worker Error:', e.message);
+    }
+
+    isPosting = false;
+}
+
+// Queue Worker runs every 1.5 seconds
+setInterval(processQueue, 1500);
+
+// =====================================================
+// Scan: collects new tokens and adds them to the queue
 // =====================================================
 async function scan() {
     const ts = new Date().toLocaleTimeString();
-    console.log(`🔍 Scan @ ${ts}  (seen: ${seen.size})`);
 
     const [profiles, boosts, top] = await Promise.all([
         dsLatestProfiles(),
@@ -418,51 +416,46 @@ async function scan() {
         dsTopBoosts(),
     ]);
 
+    // Dedupe
     const map = new Map();
     for (const item of [...profiles, ...boosts, ...top]) {
         if (!item || item.chainId !== 'solana' || !item.tokenAddress) continue;
         if (!map.has(item.tokenAddress)) map.set(item.tokenAddress, item);
     }
 
-    let posted = 0;
+    let added = 0;
     for (const item of map.values()) {
-        if (seen.has(item.tokenAddress)) continue;
+        if (isSeen(item.tokenAddress)) continue;
 
-        rememberSeen(item.tokenAddress);
-
-        const pair = await dsTokenPairs(item.tokenAddress);
-        if (!pair) {
-            console.log(`   (no pair for ${item.tokenAddress})`);
-            continue;
-        }
-
-        // Optional filters from .env – if 0 then no filter
-        const liq = pair.liquidity?.usd || 0;
-        const mc = pair.marketCap || pair.fdv || 0;
-        if (MIN_LIQUIDITY > 0 && liq < MIN_LIQUIDITY) continue;
-        if (MAX_MARKETCAP > 0 && mc > MAX_MARKETCAP) continue;
-
-        const [gt, gtInfo, svs] = await Promise.all([
+        // Fetch data in parallel
+        const [pair, gt, gtInfo, svs] = await Promise.all([
+            dsTokenPairs(item.tokenAddress),
             gtToken(item.tokenAddress),
             gtTokenInfo(item.tokenAddress),
             svsPrice(item.tokenAddress),
         ]);
 
-        if (MIN_HOLDERS > 0) {
+        if (!pair) continue;
+
+        // Optional Filters
+        const liq = pair.liquidity?.usd || 0;
+        const mc  = pair.marketCap || pair.fdv || 0;
+        if (MIN_LIQUIDITY > 0 && liq < MIN_LIQUIDITY) continue;
+        if (MAX_MARKETCAP > 0 && mc  > MAX_MARKETCAP) continue;
+        if (MIN_HOLDERS   > 0) {
             const h = gt?.holders?.count || gtInfo?.holders?.count || 0;
             if (h < MIN_HOLDERS) continue;
         }
 
-        const ok = await sendPost(item, pair, gt, gtInfo, svs);
-        if (ok) {
-            posted++;
-            console.log(`✅ Posted Detail-View (Image: ${!!(item.header || item.icon || pair?.info?.imageUrl || gtInfo?.image_url)}): ${pair.baseToken?.symbol || item.tokenAddress}`);
-            await new Promise(r => setTimeout(r, 2000));
-            if (posted >= 3) break;
-        }
+        // Mark as seen and put in queue
+        markSeen(item.tokenAddress);
+        postQueue.push({ profile: item, pair, gt, gtInfo, svs });
+        added++;
     }
 
-    if (posted === 0) console.log('   (no new tokens in this scan)');
+    if (added > 0) {
+        console.log(`🔍 Scan @ ${ts} → ${added} new tokens in queue (Queue: ${postQueue.length}, seen: ${seen.size})`);
+    }
 }
 
 // =====================================================
@@ -470,14 +463,14 @@ async function scan() {
 // =====================================================
 console.log('🚀 Solana DEX Tracker Bot started');
 console.log(`   Scan Interval:  ${SCAN_INTERVAL}ms`);
+console.log(`   Post Cooldown:  ${POST_COOLDOWN}ms`);
+console.log(`   Seen TTL:       ${SEEN_TTL_MS / 60000}min`);
 console.log(`   Min. Liquidity: ${MIN_LIQUIDITY > 0 ? '$' + MIN_LIQUIDITY : 'no filter'}`);
-console.log(`   Max. Marketcap:  ${MAX_MARKETCAP > 0 ? '$' + MAX_MARKETCAP : 'no filter'}`);
-console.log(`   GeckoTerminal:   on`);
-console.log(`   Solana Vibe:     ${SVS_API_KEY ? 'on' : 'off (no API key)'}`);
-console.log(`   Birdeye:         ${BIRDEYE_API_KEY ? 'on' : 'off (no API key)'}`);
+console.log(`   Max. Marketcap: ${MAX_MARKETCAP > 0 ? '$' + MAX_MARKETCAP : 'no filter'}`);
+console.log(`   GeckoTerminal:  on`);
+console.log(`   Solana Vibe:    ${SVS_API_KEY     ? 'on' : 'off'}`);
+console.log(`   Birdeye:        ${BIRDEYE_API_KEY ? 'on' : 'off'}`);
 
 scan().catch(e => console.error('Scan Error:', e.message));
-setInterval(() => {
-    scan().catch(e => console.error('Scan Error:', e.message));
-}, SCAN_INTERVAL);
-            
+setInterval(() => scan().catch(e => console.error('Scan Error:', e.message)), SCAN_INTERVAL);
+                                                           
